@@ -68,7 +68,7 @@ struct SharedCB
 	XMMATRIX mView;
 	XMMATRIX mProjection;
 
-	XMVECTOR mStereoParams;
+	XMVECTOR mStereoParamsArray[3];
 };
 
 
@@ -89,6 +89,10 @@ ID3D11Texture2D*                    g_pOffscreenTexture = nullptr;
 ID3D11RenderTargetView*             g_pOffscreenTextureView = nullptr;
 ID3D11Texture2D*                    g_pDepthStencil = nullptr;
 ID3D11DepthStencilView*             g_pDepthStencilView = nullptr;
+ID3D11ShaderResourceView*           g_pPackedDepthTextureSRV = nullptr;
+
+ID3D11RenderTargetView*             g_pOffscreenRTV_Color = nullptr;
+ID3D11RenderTargetView*             g_pOffscreenRTV_Depth = nullptr;
 
 ID3D11VertexShader*                 g_pVertexShader = nullptr;
 ID3D11GeometryShader*               g_pGeometryShader = nullptr;
@@ -96,6 +100,10 @@ ID3D11PixelShader*                  g_pPixelShader = nullptr;
 ID3D11InputLayout*                  g_pVertexLayout = nullptr;
 ID3D11Buffer*                       g_pVertexBuffer = nullptr;
 ID3D11Buffer*                       g_pIndexBuffer = nullptr;
+
+ID3D11VertexShader*                 g_pQuadVertexShader = nullptr;
+ID3D11PixelShader*                  g_pQuadPixelShader = nullptr;
+ID3D11PixelShader*                  g_pMSQuadPixelShader = nullptr;
 
 ID3D11Buffer*                       g_pSharedCB = nullptr;
 
@@ -108,7 +116,8 @@ UINT								g_ScreenWidth = 1920;
 UINT								g_ScreenHeight = 1080;
 
 D3D11_VIEWPORT						g_Viewport;
-D3D11_VIEWPORT						g_Viewports[2];
+
+bool								g_isMSAA = false;
 
 //--------------------------------------------------------------------------------------
 // Forward declarations
@@ -341,38 +350,126 @@ HRESULT InitDevice()
 
 	hr = g_pd3dDevice->CreateRenderTargetView(g_pBackBuffer, nullptr, &g_pRenderTargetView);
 
+	DXGI_SAMPLE_DESC sampleDesc = { 1, 0 };
+	UINT numQualityLevels;
+	//*
+	if (SUCCEEDED(g_pd3dDevice->CheckMultisampleQualityLevels(DXGI_FORMAT_B8G8R8A8_UNORM, 4, &numQualityLevels)))
+	{
+		sampleDesc.Count = 4;
+		sampleDesc.Quality = numQualityLevels - 1;
+		g_isMSAA = true;
+	}//*/
+
 	// Create Offscreen texture
 	D3D11_TEXTURE2D_DESC descOffscreen;
 	ZeroMemory(&descOffscreen, sizeof(descOffscreen));
-	descOffscreen.Width = g_ScreenWidth * 2;		// Direct stereo needs 2x size
+	descOffscreen.Width = g_ScreenWidth;
 	descOffscreen.Height = g_ScreenHeight;
 	descOffscreen.MipLevels = 1;
-	descOffscreen.ArraySize = 1;
-	descOffscreen.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-	descOffscreen.SampleDesc.Count = 1;
-	descOffscreen.SampleDesc.Quality = 0;
+	descOffscreen.ArraySize = 3; // 2 slices for stereo + 1 for mono
+	descOffscreen.Format = DXGI_FORMAT_R8G8B8A8_TYPELESS;
+	descOffscreen.SampleDesc = sampleDesc;
 	descOffscreen.Usage = D3D11_USAGE_DEFAULT;
-	descOffscreen.BindFlags = D3D11_BIND_RENDER_TARGET;
+	descOffscreen.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
 	descOffscreen.CPUAccessFlags = 0;
 	descOffscreen.MiscFlags = 0;
 	hr = g_pd3dDevice->CreateTexture2D(&descOffscreen, nullptr, &g_pOffscreenTexture);
 	if (FAILED(hr))
 		return hr;
 
-	hr = g_pd3dDevice->CreateRenderTargetView(g_pOffscreenTexture, nullptr, &g_pOffscreenTextureView);
+	D3D11_RENDER_TARGET_VIEW_DESC descOffscreenRTV;
+	ZeroMemory(&descOffscreenRTV, sizeof(descOffscreenRTV));
+	descOffscreenRTV.Format = DXGI_FORMAT_R8G8B8A8_UINT;
+	if (sampleDesc.Count > 1)
+	{
+		descOffscreenRTV.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DMSARRAY;
+		descOffscreenRTV.Texture2DMSArray.FirstArraySlice = 0;
+		descOffscreenRTV.Texture2DMSArray.ArraySize = descOffscreen.ArraySize;
+	}
+	else
+	{
+		descOffscreenRTV.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DARRAY;
+		descOffscreenRTV.Texture2DArray.MipSlice = 0;
+		descOffscreenRTV.Texture2DArray.FirstArraySlice = 0;
+		descOffscreenRTV.Texture2DArray.ArraySize = descOffscreen.ArraySize;
+	}
+
+	hr = g_pd3dDevice->CreateRenderTargetView(g_pOffscreenTexture, &descOffscreenRTV, &g_pOffscreenTextureView);
 	if (FAILED(hr))
 		return hr;
+
+	D3D11_RENDER_TARGET_VIEW_DESC descOffscreenRTV_Color;
+	ZeroMemory(&descOffscreenRTV_Color, sizeof(descOffscreenRTV_Color));
+	descOffscreenRTV_Color.Format = DXGI_FORMAT_R8G8B8A8_UINT;
+	if (sampleDesc.Count > 1)
+	{
+		descOffscreenRTV_Color.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DMSARRAY;
+		descOffscreenRTV_Color.Texture2DMSArray.FirstArraySlice = 0;
+		descOffscreenRTV_Color.Texture2DMSArray.ArraySize = 2;
+	}
+	else
+	{
+		descOffscreenRTV_Color.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DARRAY;
+		descOffscreenRTV_Color.Texture2DArray.FirstArraySlice = 0;
+		descOffscreenRTV_Color.Texture2DArray.ArraySize = 2;
+	}
+
+	hr = g_pd3dDevice->CreateRenderTargetView(g_pOffscreenTexture, &descOffscreenRTV_Color, &g_pOffscreenRTV_Color);
+	if (FAILED(hr))
+		return hr;
+
+	D3D11_RENDER_TARGET_VIEW_DESC descOffscreenRTV_Depth;
+	ZeroMemory(&descOffscreenRTV_Depth, sizeof(descOffscreenRTV_Depth));
+	descOffscreenRTV_Depth.Format = DXGI_FORMAT_R8G8B8A8_UINT;
+	if (sampleDesc.Count > 1)
+	{
+		descOffscreenRTV_Depth.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DMSARRAY;
+		descOffscreenRTV_Depth.Texture2DMSArray.FirstArraySlice = 2;
+		descOffscreenRTV_Depth.Texture2DMSArray.ArraySize = 1;
+	}
+	else
+	{
+		descOffscreenRTV_Depth.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DARRAY;
+		descOffscreenRTV_Depth.Texture2DArray.FirstArraySlice = 2;
+		descOffscreenRTV_Depth.Texture2DArray.ArraySize = 1;
+	}
+
+	hr = g_pd3dDevice->CreateRenderTargetView(g_pOffscreenTexture, &descOffscreenRTV_Depth, &g_pOffscreenRTV_Depth);
+	if (FAILED(hr))
+		return hr;
+
+	D3D11_SHADER_RESOURCE_VIEW_DESC descOffscreenSRV;
+	descOffscreenSRV.Format = DXGI_FORMAT_R8G8B8A8_UINT;
+	if (sampleDesc.Count > 1)
+	{
+		descOffscreenSRV.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DMSARRAY;
+		descOffscreenSRV.Texture2DMSArray.FirstArraySlice = 2;
+		descOffscreenSRV.Texture2DMSArray.ArraySize = 1;
+	}
+	else
+	{
+		descOffscreenSRV.Texture2DArray.MostDetailedMip = 0;
+		descOffscreenSRV.Texture2DArray.MipLevels = 1;
+		descOffscreenSRV.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+		descOffscreenSRV.Texture2DArray.FirstArraySlice = 2;
+		descOffscreenSRV.Texture2DArray.ArraySize = 1;
+	}
+
+	hr = g_pd3dDevice->CreateShaderResourceView(g_pOffscreenTexture, &descOffscreenSRV, &g_pPackedDepthTextureSRV);
+	if (FAILED(hr))
+		return hr;
+
+	
 
 	// Create depth stencil texture
 	D3D11_TEXTURE2D_DESC descDepth;
 	ZeroMemory(&descDepth, sizeof(descDepth));
-	descDepth.Width = g_ScreenWidth * 2;		// Direct stereo needs 2x size
+	descDepth.Width = g_ScreenWidth;
 	descDepth.Height = g_ScreenHeight;
 	descDepth.MipLevels = 1;
-	descDepth.ArraySize = 1;
+	descDepth.ArraySize = 3; // 2 slices for stereo + 1 for mono
 	descDepth.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
-	descDepth.SampleDesc.Count = 1;
-	descDepth.SampleDesc.Quality = 0;
+	descDepth.SampleDesc = sampleDesc;
 	descDepth.Usage = D3D11_USAGE_DEFAULT;
 	descDepth.BindFlags = D3D11_BIND_DEPTH_STENCIL;
 	descDepth.CPUAccessFlags = 0;
@@ -387,40 +484,33 @@ HRESULT InitDevice()
 	D3D11_DEPTH_STENCIL_VIEW_DESC descDSV;
 	ZeroMemory(&descDSV, sizeof(descDSV));
 	descDSV.Format = descDepth.Format;
-	descDSV.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
-	descDSV.Texture2D.MipSlice = 0;
-	hr = g_pd3dDevice->CreateDepthStencilView(g_pDepthStencil, &descDSV, &g_pDepthStencilView);
+	if (sampleDesc.Count > 1)
+	{
+		descDSV.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2DMSARRAY;
+		descDSV.Texture2DMSArray.ArraySize = 2;
+		descDSV.Texture2DMSArray.FirstArraySlice = 0;
+	}
+	else
+	{
+		descDSV.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2DARRAY;
+		descDSV.Texture2DArray.ArraySize = 2;
+		descDSV.Texture2DArray.FirstArraySlice = 0;
+		descDSV.Texture2DArray.MipSlice = 0;
+	}
+	hr = g_pd3dDevice->CreateDepthStencilView(g_pDepthStencil, nullptr/*&descDSV*/, &g_pDepthStencilView);
 	if (FAILED(hr))
 		return hr;
 
-
-	// This viewport is 2x the screen width.  The documentation directly contradicts
-	// this usage and suggests per-eye specific ViewPorts, but this works correctly.
-
-	g_Viewport.Width = (FLOAT)g_ScreenWidth * 2;		// Direct stereo needs the viewport 2x as well
+	g_Viewport.Width = (FLOAT)g_ScreenWidth;
 	g_Viewport.Height = (FLOAT)g_ScreenHeight;
 	g_Viewport.MinDepth = 0.0f;
 	g_Viewport.MaxDepth = 1.0f;
 	g_Viewport.TopLeftX = 0;
 	g_Viewport.TopLeftY = 0;
 
-	g_Viewports[0].Width = (FLOAT)g_ScreenWidth;
-	g_Viewports[0].Height = (FLOAT)g_ScreenHeight;
-	g_Viewports[0].MinDepth = 0.0f;
-	g_Viewports[0].MaxDepth = 1.0f;
-	g_Viewports[0].TopLeftX = 0;
-	g_Viewports[0].TopLeftY = 0;
-
-	g_Viewports[1].Width = (FLOAT)g_ScreenWidth;
-	g_Viewports[1].Height = (FLOAT)g_ScreenHeight;
-	g_Viewports[1].MinDepth = 0.0f;
-	g_Viewports[1].MaxDepth = 1.0f;
-	g_Viewports[1].TopLeftX = (FLOAT)g_ScreenWidth;
-	g_Viewports[1].TopLeftY = 0;
-
 	// Compile the vertex shader
 	ID3DBlob* pVSBlob = nullptr;
-	hr = CompileShaderFromFile(L"Tutorial07.fx", "VS", "vs_4_0", &pVSBlob);
+	hr = CompileShaderFromFile(L"Tutorial07.fx", "VS", "vs_5_0", &pVSBlob);
 	if (FAILED(hr))
 	{
 		MessageBox(nullptr,
@@ -457,7 +547,7 @@ HRESULT InitDevice()
 
 	// Compile the geometry shader
 	ID3DBlob* pGSBlob = nullptr;
-	hr = CompileShaderFromFile(L"Tutorial07.fx", "GS", "gs_4_0", &pGSBlob);
+	hr = CompileShaderFromFile(L"Tutorial07.fx", "GS", "gs_5_0", &pGSBlob);
 	if (FAILED(hr))
 	{
 		MessageBox(nullptr,
@@ -475,7 +565,7 @@ HRESULT InitDevice()
 
 	// Compile the pixel shader
 	ID3DBlob* pPSBlob = nullptr;
-	hr = CompileShaderFromFile(L"Tutorial07.fx", "PS", "ps_4_0", &pPSBlob);
+	hr = CompileShaderFromFile(L"Tutorial07.fx", "PS", "ps_5_0", &pPSBlob);
 	if (FAILED(hr))
 	{
 		MessageBox(nullptr,
@@ -488,6 +578,54 @@ HRESULT InitDevice()
 	pPSBlob->Release();
 	if (FAILED(hr))
 		return hr;
+
+	{
+		// Compile the vertex shader
+		ID3DBlob* pVSBlob = nullptr;
+		hr = CompileShaderFromFile(L"Tutorial07.fx", "QuadVS", "vs_5_0", &pVSBlob);
+		if (FAILED(hr))
+		{
+			MessageBox(nullptr,
+				L"The FX file cannot be compiled.  Please run this executable from the directory that contains the FX file.", L"Error", MB_OK);
+			return hr;
+		}
+		hr = g_pd3dDevice->CreateVertexShader(pVSBlob->GetBufferPointer(), pVSBlob->GetBufferSize(), nullptr, &g_pQuadVertexShader);
+		pVSBlob->Release();
+		if (FAILED(hr))
+			return hr;
+
+		// Compile the pixel shader
+		ID3DBlob* pPSBlob = nullptr;
+		hr = CompileShaderFromFile(L"Tutorial07.fx", "QuadPS", "ps_5_0", &pPSBlob);
+		if (FAILED(hr))
+		{
+			MessageBox(nullptr,
+				L"The FX file cannot be compiled.  Please run this executable from the directory that contains the FX file.", L"Error", MB_OK);
+			return hr;
+		}
+
+		// Create the pixel shader
+		hr = g_pd3dDevice->CreatePixelShader(pPSBlob->GetBufferPointer(), pPSBlob->GetBufferSize(), nullptr, &g_pQuadPixelShader);
+		pPSBlob->Release();
+		if (FAILED(hr))
+			return hr;
+
+		// Compile the pixel shader
+		ID3DBlob* pPSBlob1 = nullptr;
+		hr = CompileShaderFromFile(L"Tutorial07.fx", "MSQuadPS", "ps_5_0", &pPSBlob1);
+		if (FAILED(hr))
+		{
+			MessageBox(nullptr,
+				L"The FX file cannot be compiled.  Please run this executable from the directory that contains the FX file.", L"Error", MB_OK);
+			return hr;
+		}
+
+		// Create the pixel shader
+		hr = g_pd3dDevice->CreatePixelShader(pPSBlob1->GetBufferPointer(), pPSBlob1->GetBufferSize(), nullptr, &g_pMSQuadPixelShader);
+		pPSBlob1->Release();
+		if (FAILED(hr))
+			return hr;
+	}
 
 	// Create vertex buffer for the cube
 	SimpleVertex vertices[] =
@@ -573,11 +711,6 @@ HRESULT InitDevice()
 	if (FAILED(hr))
 		return hr;
 
-	// Set index buffer
-	g_pImmediateContext->IASetIndexBuffer(g_pIndexBuffer, DXGI_FORMAT_R16_UINT, 0);
-
-	// Set primitive topology
-	g_pImmediateContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
 	// Create the constant buffer
 	bd.Usage = D3D11_USAGE_DEFAULT;
@@ -664,36 +797,28 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 	return 0;
 }
 
-
-//--------------------------------------------------------------------------------------
-// Render current image, eye independent.  
-//--------------------------------------------------------------------------------------
-void Render()
-{
-	//
-	// Render the cube
-	//
-	// Projection matrix in g_pSharedCB determines eye view.
-	//
-	g_pImmediateContext->VSSetShader(g_pVertexShader, nullptr, 0);
-	g_pImmediateContext->VSSetConstantBuffers(0, 1, &g_pSharedCB);
-	g_pImmediateContext->GSSetShader(g_pGeometryShader, nullptr, 0);
-	g_pImmediateContext->GSSetConstantBuffers(0, 1, &g_pSharedCB);
-	g_pImmediateContext->PSSetShader(g_pPixelShader, nullptr, 0);
-	g_pImmediateContext->DrawIndexed(36, 0, 0);
-}
-
-
 //--------------------------------------------------------------------------------------
 // Render a frame, both eyes.
 //--------------------------------------------------------------------------------------
+
+void PackFloat(FLOAT in, FLOAT* out)
+{
+	DWORD dw = *(DWORD*)&in;
+	out[0] = dw & 255; out[1] = (dw >> 8) & 255; out[2] = (dw >> 16) & 255; out[3] = (dw >> 24);
+}
+
 void RenderFrame()
 {
 	g_pImmediateContext->OMSetRenderTargets(1, &g_pOffscreenTextureView, g_pDepthStencilView);
-
 	//
-	// Clear the back buffer
-	g_pImmediateContext->ClearRenderTargetView(g_pOffscreenTextureView, Colors::MidnightBlue);
+	// Clear color in left & right eyes
+	FLOAT clearColor[4] = { 0, 0, 128, 255 };
+	g_pImmediateContext->ClearRenderTargetView(g_pOffscreenRTV_Color, clearColor);
+
+	// Clear packed depth
+	FLOAT clearDepth[4];
+	PackFloat(FLT_MAX, clearDepth);
+	g_pImmediateContext->ClearRenderTargetView(g_pOffscreenRTV_Depth, clearDepth);
 
 	//
 	// Clear the depth buffer to 1.0 (max depth)
@@ -723,31 +848,61 @@ void RenderFrame()
 		NvAPI_Stereo_GetEyeSeparation(g_StereoHandle, &pEyeSeparation);
 	}
 
-	cb.mStereoParams.vector4_f32[0] = pEyeSeparation * pSeparationPercentage / 100;
-	cb.mStereoParams.vector4_f32[1] = pConvergence;
+	cb.mStereoParamsArray[0] = { -pEyeSeparation * pSeparationPercentage / 100, pConvergence, 0.0f, 0.0f }; //left eye
+	cb.mStereoParamsArray[1] = { +pEyeSeparation * pSeparationPercentage / 100, pConvergence, 0.0f, 0.0f }; //right eye
+	cb.mStereoParamsArray[2] = { 0.0f, 0.0f, 0.0f, 0.0f }; //mono
 
 
 	{
-		g_pImmediateContext->RSSetViewports(2, g_Viewports);
+		g_pImmediateContext->RSSetViewports(1, &g_Viewport);
+		// Set index buffer
+		g_pImmediateContext->IASetIndexBuffer(g_pIndexBuffer, DXGI_FORMAT_R16_UINT, 0);
+
+		// Set primitive topology
+		g_pImmediateContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
 		cb.mWorld = XMMatrixTranspose(g_World);
 		cb.mView = XMMatrixTranspose(g_View);
 		cb.mProjection = XMMatrixTranspose(g_Projection);
 		g_pImmediateContext->UpdateSubresource(g_pSharedCB, 0, nullptr, &cb, 0, 0);
 
-		Render();
+		//
+		// Render the cube
+		//
+		g_pImmediateContext->VSSetShader(g_pVertexShader, nullptr, 0);
+		g_pImmediateContext->VSSetConstantBuffers(0, 1, &g_pSharedCB);
+		g_pImmediateContext->GSSetShader(g_pGeometryShader, nullptr, 0);
+		g_pImmediateContext->GSSetConstantBuffers(0, 1, &g_pSharedCB);
+		g_pImmediateContext->PSSetShader(g_pPixelShader, nullptr, 0);
+		g_pImmediateContext->DrawIndexed(36, 0, 0);
 	}
 
 	//
 	// Copy left/right eye to back buffer
 	//
 	NvAPI_Stereo_SetActiveEye(g_StereoHandle, NVAPI_STEREO_EYE_LEFT);
-	D3D11_BOX srcBoxLeft = { 0, 0, 0, g_ScreenWidth, g_ScreenHeight, 1 };
-	g_pImmediateContext->CopySubresourceRegion(g_pBackBuffer, 0, 0, 0, 0, g_pOffscreenTexture, 0, &srcBoxLeft);
+	g_pImmediateContext->ResolveSubresource(g_pBackBuffer, 0, g_pOffscreenTexture, 0, DXGI_FORMAT_R8G8B8A8_UNORM);
 
 	NvAPI_Stereo_SetActiveEye(g_StereoHandle, NVAPI_STEREO_EYE_RIGHT);
-	D3D11_BOX srcBoxRight = { g_ScreenWidth, 0, 0, g_ScreenWidth * 2, g_ScreenHeight, 1 };
-	g_pImmediateContext->CopySubresourceRegion(g_pBackBuffer, 0, 0, 0, 0, g_pOffscreenTexture, 0, &srcBoxRight);
+	g_pImmediateContext->ResolveSubresource(g_pBackBuffer, 0, g_pOffscreenTexture, 1, DXGI_FORMAT_R8G8B8A8_UNORM);
+
+	if (::GetAsyncKeyState(VK_SPACE))
+	{
+		NvAPI_Stereo_SetActiveEye(g_StereoHandle, NVAPI_STEREO_EYE_MONO);
+
+		g_pImmediateContext->OMSetRenderTargets(1, &g_pRenderTargetView, nullptr);
+
+		g_pImmediateContext->VSSetShader(g_pQuadVertexShader, nullptr, 0);
+		g_pImmediateContext->GSSetShader(nullptr, nullptr, 0);
+		g_pImmediateContext->PSSetShader(g_isMSAA ? g_pMSQuadPixelShader : g_pQuadPixelShader, nullptr, 0);
+		g_pImmediateContext->PSSetShaderResources(0, 1, &g_pPackedDepthTextureSRV);
+
+		g_pImmediateContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+		g_pImmediateContext->Draw(4, 0);
+
+		ID3D11ShaderResourceView* nullSRV = nullptr;
+		g_pImmediateContext->PSSetShaderResources(0, 1, &nullSRV);
+	}
 
 	//
 	// Present our back buffer to our front buffer

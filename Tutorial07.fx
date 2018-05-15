@@ -4,6 +4,18 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 //--------------------------------------------------------------------------------------
 
+uint4 packDepth(float depth)
+{
+	uint uiDepth = asuint(depth);
+	return uint4(uiDepth & 255, (uiDepth >> 8) & 255, (uiDepth >> 16) & 255, (uiDepth >> 24));
+}
+
+float unpackDepth(uint4 packedDepth)
+{
+	uint uiDepth = packedDepth.x | (packedDepth.y << 8) | (packedDepth.z << 16) | (packedDepth.w << 24);
+	return asfloat(uiDepth);
+}
+
 //--------------------------------------------------------------------------------------
 // Constant Buffer Variables
 //--------------------------------------------------------------------------------------
@@ -14,7 +26,7 @@ cbuffer cbShared : register( b0 )
 	matrix View;
 	matrix Projection;
 
-	float4 StereoParams;
+	float4 StereoParamsArray[3];
 };
 
 
@@ -35,7 +47,7 @@ struct GS_OUTPUT
 {
 	float4 Pos : SV_POSITION;
 	float2 Tex : TEXCOORD0;
-	uint viewport : SV_ViewportArrayIndex;
+	uint rtIndex : SV_RenderTargetArrayIndex;
 };
 
 //--------------------------------------------------------------------------------------
@@ -52,41 +64,66 @@ PS_INPUT VS( VS_INPUT input )
     return output;
 }
 
-float4 MakeStereo(float4 pos, float eyeSign)
+float4 GetStereoPos(float4 pos, float4 stereoParams)
 {
 	float4 spos = pos;
-	spos.x += eyeSign * StereoParams[0] * (spos.w - StereoParams[1]);
+	spos.x += stereoParams[0] * (spos.w - stereoParams[1]);
 	return spos;
 }
 
-[maxvertexcount(6)]
-void GS(triangle PS_INPUT In[3], inout TriangleStream<GS_OUTPUT> TriStream)
+[instance(3)]
+[maxvertexcount(3)]
+void GS(triangle PS_INPUT In[3], inout TriangleStream<GS_OUTPUT> TriStream, uint gsInstanceId : SV_GSInstanceID)
 {
 	GS_OUTPUT output;
-
-	output.viewport = 0;
+	output.rtIndex = gsInstanceId;
 	[unroll] for (int v = 0; v < 3; v++)
 	{
-		output.Pos = MakeStereo(In[v].Pos, -1.0f);
+		output.Pos = GetStereoPos(In[v].Pos, StereoParamsArray[gsInstanceId]);
 		output.Tex = In[v].Tex;
 		TriStream.Append(output);
 	}
-	TriStream.RestartStrip();
-
-	output.viewport = 1;
-	[unroll] for (int v = 0; v < 3; v++)
-	{
-		output.Pos = MakeStereo(In[v].Pos, +1.0f);
-		output.Tex = In[v].Tex;
-		TriStream.Append(output);
-	}
-	TriStream.RestartStrip();
 }
 
 //--------------------------------------------------------------------------------------
 // Pixel Shader
 //--------------------------------------------------------------------------------------
-float4 PS( PS_INPUT input) : SV_Target
+
+//[earlydepthstencil]
+uint4 PS(PS_INPUT input, uint rtIndex : SV_RenderTargetArrayIndex) : SV_Target
 {
-    return float4(0.5, 0.5, 0.5, 1);
+	if (rtIndex == 2)
+	{
+		return packDepth(input.Pos.w);
+	}
+	return uint4(128, 128, 128, 255);
+}
+
+
+struct QuadVS_Output {
+	float4 pos : SV_POSITION;
+};
+
+QuadVS_Output QuadVS(uint vIdx : SV_VertexID)
+{
+	QuadVS_Output output;
+	float2 tex = float2(vIdx % 2, vIdx % 4 / 2);
+	output.pos = float4((tex.x - 0.5f) * 2, -(tex.y - 0.5f) * 2, 0, 1);
+	return output;
+}
+
+Texture2D<uint4> PackedDepthSRV : register(t0);
+
+float4 QuadPS(QuadVS_Output input) : SV_Target
+{
+	float depth = unpackDepth(PackedDepthSRV.Load(int3(input.pos.xy, 0))) * 0.1f;
+	return float4(depth, 0.0f, depth, 1.0f);
+}
+
+Texture2DMS<uint4> PackedDepthSRV_MS : register(t0);
+
+float4 MSQuadPS(QuadVS_Output input) : SV_Target
+{
+	float depth = unpackDepth(PackedDepthSRV_MS.Load(int3(input.pos.xy, 0), 0)) * 0.1f;
+	return float4(depth, 0.0f, depth, 1.0f);
 }
